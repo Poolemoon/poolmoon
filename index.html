@@ -451,7 +451,7 @@ async function load(){
   ]);
   if (c.error) return fail(c.error); if (e.error) return fail(e.error); if (u.error) return fail(u.error);
   customers = c.data; earnings = e.data; updates = u.data;
-  milestones = m.error ? [] : m.data; if (m.error) console.error(m.error);
+  milestones = m.error ? [] : m.data.filter(x=>customers.some(c=>c.id===x.customer_id)); if (m.error) console.error(m.error);
 }
 
 /* live: client updates appear on the panel instantly */
@@ -459,7 +459,9 @@ function startLive(){
   if (liveCh) sb.removeChannel(liveCh);
   liveCh = sb.channel("panel-live")
     .on("postgres_changes",{event:"*",schema:"public",table:"customers"}, p=>{
-      if (p.eventType==="DELETE"){ customers = customers.filter(x=>x.id!==p.old.id); }
+      if (p.eventType==="DELETE"){ customers = customers.filter(x=>x.id!==p.old.id);
+        milestones = milestones.filter(m=>m.customer_id!==p.old.id); updates = updates.filter(u=>u.customer_id!==p.old.id); renderBell();
+        if (!$("milestones").classList.contains("hidden")) renderMilestones(); }
       else { const i = customers.findIndex(x=>x.id===p.new.id);
         if (i>=0) customers[i] = {...customers[i], ...p.new}; else customers.unshift(p.new);
         if (current && current.id===p.new.id) current = customers.find(x=>x.id===p.new.id); }
@@ -471,6 +473,10 @@ function startLive(){
       const c = customers.find(x=>x.id===p.new.customer_id);
       setTimeout(()=>toast(`🎉 ${(c && c.name) || "A client"} reached ${eur(p.new.milestone)}!`), 2600);
       renderBell();
+      if (!$("milestones").classList.contains("hidden")) renderMilestones();
+    })
+    .on("postgres_changes",{event:"DELETE",schema:"public",table:"milestones"}, p=>{
+      milestones = milestones.filter(x=>x.id!==p.old.id); renderBell();
       if (!$("milestones").classList.contains("hidden")) renderMilestones();
     })
     .on("postgres_changes",{event:"UPDATE",schema:"public",table:"milestones"}, p=>{
@@ -547,7 +553,9 @@ function renderMilestones(){
   d.append(el("button",{class:"back",onclick:()=>go("home")},"‹ Home"),
     el("div",{class:"row",style:"justify-content:space-between;margin:6px 0 4px"},
       el("h2",{style:"margin:0"},"🏆 Milestones"),
-      n ? el("button",{class:"btn sec",style:"padding:9px 12px;font-size:14px",onclick:markSeen},"Mark all read") : null),
+      el("div",{class:"row",style:"gap:8px"},
+        n ? el("button",{class:"btn sec",style:"padding:9px 12px;font-size:14px",onclick:markSeen},"Mark read") : null,
+        milestones.length ? el("button",{class:"btn danger",style:"padding:9px 12px;font-size:14px",onclick:clearMilestones},"Clear all") : null)),
     el("div",{style:"font-size:13px;color:var(--muted);margin-bottom:12px"},"You get one here every time a client's Freecash balance climbs past €100, €200, €300…"));
   const list = el("div",{class:"list stagger"});
   if (!milestones.length) list.append(el("div",{class:"empty"},"No milestones yet. They'll show up here the moment a client reaches €100."));
@@ -558,9 +566,21 @@ function renderMilestones(){
       el("div",{style:"flex:1;min-width:0"},
         el("div",{class:"n",style:"font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"}, (c?.name)||"Deleted client", isNew(m)?el("span",{class:"tag"},"NEW"):null),
         el("div",{style:"font-size:13px;color:var(--muted);margin-top:3px"}, `Balance ${eur(Number(m.balance))}${m.previous_balance!=null?" (was "+eur(Number(m.previous_balance))+")":""} · ${ago(m.created_at)}`)),
-      el("div",{class:"amt"}, eur(m.milestone))));
+      el("div",{class:"amt"}, eur(m.milestone)),
+      el("button",{class:"x",title:"Delete",onclick:e=>{ e.stopPropagation(); delMilestone(m); }},"×")));
   });
   d.append(list, el("div",{style:"height:40px"}));
+}
+async function delMilestone(m){
+  const {error} = await sb.from("milestones").delete().eq("id",m.id); if (error) return fail(error);
+  milestones = milestones.filter(x=>x.id!==m.id); renderBell(); renderMilestones(); toast("Notification deleted");
+}
+function clearMilestones(){
+  confirmSheet("Clear all milestones?", "This deletes every milestone notification, for you and Kian. Clients' balances and progress aren't affected.",
+    [["🗑 Clear all","danger",async()=>{
+        const {error} = await sb.from("milestones").delete().in("id", milestones.map(m=>m.id)); if (error) throw error;
+        milestones = []; renderBell(); renderMilestones(); toast("All milestones cleared"); }],
+     ["Cancel","sec",null]]);
 }
 async function markSeen(){
   const { error } = await sb.rpc("mark_milestones_seen"); if (error) return fail(error);
@@ -667,7 +687,8 @@ function renderDetail(animate){
     const lg = el("div",{class:"card",style:"margin-top:12px"}, el("h3",{},"Client login"));
     if (c.login_username){
       lg.append(el("div",{class:"info"}, el("div",{class:"k"},"Username"), el("div",{class:"v"},c.login_username)),
-        el("div",{class:"s",style:"font-size:13px;color:var(--muted);margin-top:8px"},"They log in on the same page as you and only see their own progress page."));
+        el("div",{class:"s",style:"font-size:13px;color:var(--muted);margin-top:8px"},"They log in on the same page as you and only see their own progress page."),
+        el("button",{class:"btn danger",style:"width:100%;margin-top:14px",onclick:()=>confirmRemoveLogin(c)},"🔒 Remove login"));
     } else {
       lg.append(el("div",{style:"color:var(--ink2);font-size:14px;margin-bottom:12px"},"This client has no login yet."),
         el("button",{class:"btn",style:"width:100%",onclick:()=>loginForm(c)},"🔑 Create client login"));
@@ -814,10 +835,42 @@ async function delEarning(x){
   const {error}=await sb.from("earnings").delete().eq("id",x.id); if(error) return fail(error);
   earnings = earnings.filter(e=>e.id!==x.id); renderDetail();
 }
-async function delCustomer(c){
-  if (!confirm(`Delete ${c.name} and all their earnings? This can't be undone.`)) return;
-  const {error}=await sb.from("customers").delete().eq("id",c.id); if(error) return fail(error);
-  customers = customers.filter(x=>x.id!==c.id); earnings = earnings.filter(e=>e.customer_id!==c.id); toast("Client deleted"); go("home");
+async function removeLogin(c){
+  const { data, error } = await sb.functions.invoke("delete-client-login", { body:{ customer_id:c.id } });
+  if (error){ let msg=error.message; try{ msg=(await error.context.json()).error||msg; }catch(_){} throw new Error(msg); }
+  if (data?.error) throw new Error(data.error);
+  if (data?.customer) Object.assign(c, data.customer);
+}
+async function deleteClientRow(c){
+  const {error}=await sb.from("customers").delete().eq("id",c.id); if(error) throw error;
+  customers = customers.filter(x=>x.id!==c.id); earnings = earnings.filter(e=>e.customer_id!==c.id);
+  updates = updates.filter(u=>u.customer_id!==c.id); milestones = milestones.filter(m=>m.customer_id!==c.id);
+}
+function confirmSheet(title, text, buttons){
+  const s=$("sheet"); s.innerHTML="";
+  s.append(el("div",{class:"card"}, el("h2",{style:"margin-top:0"},title),
+    el("div",{style:"color:var(--ink2);font-size:14px;line-height:1.5"},text),
+    el("div",{style:"display:flex;flex-direction:column;gap:10px;margin-top:18px"},
+      buttons.map(([label,cls,fn])=>{ const b=el("button",{class:"btn "+cls,type:"button",style:"width:100%"},label);
+        b.onclick=async()=>{ if(!fn) return closeSheet(); s.querySelectorAll("button").forEach(x=>x.disabled=true); b.textContent="Working…";
+          try{ await fn(); closeSheet(); }catch(err){ closeSheet(); fail(err); } }; return b; }))));
+  s.classList.remove("hidden"); s.onclick=e=>{ if(e.target===s) closeSheet(); };
+}
+function delCustomer(c){
+  if (c.login_username || c.user_id){
+    confirmSheet(`Delete ${c.name}?`,
+      `This client has a login (${c.login_username||"client"}). Their progress, milestones and earnings are deleted either way. This can't be undone.`,
+      [["🗑 Delete client + login","danger",async()=>{ await removeLogin(c); await deleteClientRow(c); toast("Client and login deleted"); go("home"); }],
+       ["Delete client, keep login","sec",async()=>{ await deleteClientRow(c); toast("Client deleted (login kept)"); go("home"); }],
+       ["Cancel","sec",null]]);
+  } else {
+    confirmSheet(`Delete ${c.name}?`, "This deletes the client and all their earnings and progress. This can't be undone.",
+      [["🗑 Delete client","danger",async()=>{ await deleteClientRow(c); toast("Client deleted"); go("home"); }],["Cancel","sec",null]]);
+  }
+}
+function confirmRemoveLogin(c){
+  confirmSheet("Remove login?", `${c.login_username} won't be able to log in anymore and the login is erased from the server. The client and their history stay in your panel, and you can give them a new login later.`,
+    [["🔒 Remove login","danger",async()=>{ await removeLogin(c); toast("Login removed"); renderDetail(); }],["Cancel","sec",null]]);
 }
 $("fab").onclick = ()=>customerForm(null);
 
